@@ -1,0 +1,4 @@
+aws_region        = "eu-west-1"
+project_name      = "iot-sensor-project"
+raspberry_pi_ip   = "1.2.3.4"   # Tu IP pública real
+ec2_key_pair_name = "mi-keypair"
