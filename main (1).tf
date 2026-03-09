@@ -1,5 +1,6 @@
 # ============================================================
 # ARQUITECTURA IoT: Raspberry Pi → VPN → EC2 → Lambda → DynamoDB → S3
+# (Versión adaptada para AWS Academy / Vocareum Lab)
 # ============================================================
 
 terraform {
@@ -15,6 +16,9 @@ terraform {
 provider "aws" {
   region = var.aws_region
 }
+
+# Obtener dinámicamente el ID de la cuenta para los roles del laboratorio
+data "aws_caller_identity" "current" {}
 
 # ============================================================
 # VPC Y RED
@@ -125,7 +129,7 @@ resource "aws_vpn_connection" "raspberry_vpn" {
   }
 }
 
-# Ruta estática VPN → subred de la Raspberry Pi (ajustar CIDR según red local)
+# Ruta estática VPN → subred de la Raspberry Pi
 resource "aws_vpn_connection_route" "raspberry_subnet" {
   vpn_connection_id      = aws_vpn_connection.raspberry_vpn.id
   destination_cidr_block = "192.168.1.0/24" # Red local de la Raspberry Pi
@@ -153,7 +157,7 @@ resource "aws_security_group" "ec2_sg" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] # Restringir a tu IP en producción
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
   # Puerto de aplicación para recibir datos de sensores desde Raspberry Pi
@@ -162,7 +166,7 @@ resource "aws_security_group" "ec2_sg" {
     from_port   = 8883
     to_port     = 8883
     protocol    = "tcp"
-    cidr_blocks = ["192.168.1.0/24"] # Red local Raspberry Pi
+    cidr_blocks = ["192.168.1.0/24"]
   }
 
   # MQTT estándar
@@ -207,49 +211,14 @@ data "aws_ami" "amazon_linux" {
   }
 }
 
-# IAM Role para EC2 (invocar Lambda)
-resource "aws_iam_role" "ec2_role" {
-  name = "${var.project_name}-ec2-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = { Service = "ec2.amazonaws.com" }
-    }]
-  })
-
-  tags = { Project = var.project_name }
-}
-
-resource "aws_iam_role_policy" "ec2_lambda_invoke" {
-  name = "${var.project_name}-ec2-lambda-invoke"
-  role = aws_iam_role.ec2_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = ["lambda:InvokeFunction"]
-      Resource = [aws_lambda_function.ingest_sensor_data.arn]
-    }]
-  })
-}
-
-resource "aws_iam_instance_profile" "ec2_profile" {
-  name = "${var.project_name}-ec2-profile"
-  role = aws_iam_role.ec2_role.name
-}
-
-# Instancia EC2
+# Instancia EC2 (USANDO ROL DEL LABORATORIO)
 resource "aws_instance" "sensor_broker" {
   ami                    = data.aws_ami.amazon_linux.id
   instance_type          = var.ec2_instance_type
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.ec2_sg.id]
   key_name               = var.ec2_key_pair_name
-  iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
+  iam_instance_profile   = "LabInstanceProfile"
 
   user_data = <<-EOF
     #!/bin/bash
@@ -377,7 +346,7 @@ resource "aws_s3_object" "index_html" {
         body { font-family: Arial, sans-serif; background: #1a1a2e; color: #eee; margin: 0; padding: 20px; }
         h1 { color: #e94560; text-align: center; }
         .card { background: #16213e; border-radius: 8px; padding: 20px; margin: 10px; display: inline-block; min-width: 200px; }
-        .value { font-size: 2em; color: #0f3460; color: #e94560; font-weight: bold; }
+        .value { font-size: 2em; color: #e94560; font-weight: bold; }
         #data-container { text-align: center; }
       </style>
     </head>
@@ -398,10 +367,9 @@ resource "aws_s3_object" "index_html" {
         </div>
       </div>
       <script>
-        // Actualizar con datos del API Gateway
         async function fetchData() {
           try {
-            const res = await fetch('/sensor-data'); // Sustituir por URL del API Gateway
+            const res = await fetch('/sensor-data');
             const data = await res.json();
             if (data.Items && data.Items.length > 0) {
               const latest = data.Items[data.Items.length - 1];
@@ -417,89 +385,6 @@ resource "aws_s3_object" "index_html" {
     </body>
     </html>
   HTML
-}
-
-# ============================================================
-# IAM ROLES PARA LAMBDAS
-# ============================================================
-
-# Role Lambda 1: ingerir datos → DynamoDB
-resource "aws_iam_role" "lambda_ingest_role" {
-  name = "${var.project_name}-lambda-ingest-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = { Service = "lambda.amazonaws.com" }
-    }]
-  })
-
-  tags = { Project = var.project_name }
-}
-
-resource "aws_iam_role_policy" "lambda_ingest_policy" {
-  name = "${var.project_name}-lambda-ingest-policy"
-  role = aws_iam_role.lambda_ingest_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = ["dynamodb:PutItem", "dynamodb:UpdateItem"]
-        Resource = aws_dynamodb_table.sensor_data.arn
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "arn:aws:logs:*:*:*"
-      }
-    ]
-  })
-}
-
-# Role Lambda 2: leer DynamoDB → S3
-resource "aws_iam_role" "lambda_publish_role" {
-  name = "${var.project_name}-lambda-publish-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = { Service = "lambda.amazonaws.com" }
-    }]
-  })
-
-  tags = { Project = var.project_name }
-}
-
-resource "aws_iam_role_policy" "lambda_publish_policy" {
-  name = "${var.project_name}-lambda-publish-policy"
-  role = aws_iam_role.lambda_publish_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = ["dynamodb:Scan", "dynamodb:Query", "dynamodb:GetItem"]
-        Resource = aws_dynamodb_table.sensor_data.arn
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
-        Resource = "${aws_s3_bucket.web_dashboard.arn}/*"
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "arn:aws:logs:*:*:*"
-      }
-    ]
-  })
 }
 
 # ============================================================
@@ -522,21 +407,8 @@ dynamodb = boto3.resource('dynamodb')
 TABLE_NAME = os.environ['DYNAMODB_TABLE']
 
 def handler(event, context):
-    """
-    Recibe datos de sensores enviados por la EC2 y los almacena en DynamoDB.
-    Payload esperado:
-    {
-        "sensor_id": "sensor_001",
-        "temperature": 23.5,
-        "humidity": 60.2,
-        "pressure": 1013.25,
-        "location": "sala_principal"
-    }
-    """
     try:
         table = dynamodb.Table(TABLE_NAME)
-
-        # Soporta invocación directa y via API Gateway
         if isinstance(event.get('body'), str):
             body = json.loads(event['body'])
         elif isinstance(event.get('body'), dict):
@@ -561,7 +433,7 @@ def handler(event, context):
         return {
             'statusCode': 200,
             'headers': {'Content-Type': 'application/json'},
-            'body': json.dumps({'message': 'Datos guardados correctamente', 'timestamp': timestamp})
+            'body': json.dumps({'message': 'Datos guardados', 'timestamp': timestamp})
         }
 
     except Exception as e:
@@ -577,7 +449,7 @@ def handler(event, context):
 
 resource "aws_lambda_function" "ingest_sensor_data" {
   function_name    = "${var.project_name}-ingest-sensor-data"
-  role             = aws_iam_role.lambda_ingest_role.arn
+  role             = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/LabRole" # ROL LABORATORIO
   handler          = "handler.handler"
   runtime          = "python3.12"
   filename         = data.archive_file.lambda_ingest_zip.output_path
@@ -626,22 +498,12 @@ class DecimalEncoder(json.JSONEncoder):
         return super().default(obj)
 
 def handler(event, context):
-    """
-    Lee los últimos datos de DynamoDB y actualiza el archivo data.json
-    en el bucket S3 para que el dashboard web los consuma.
-    Se puede disparar por: API Gateway GET /sensor-data, EventBridge (cron), o DynamoDB Streams.
-    """
     try:
         table = dynamodb.Table(TABLE_NAME)
-
-        # Obtener los últimos 100 registros
         response = table.scan(Limit=100)
         items = response.get('Items', [])
-
-        # Ordenar por timestamp descendente
         items.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
 
-        # Preparar payload para el dashboard
         dashboard_data = {
             'last_updated': datetime.now(timezone.utc).isoformat(),
             'total_records': len(items),
@@ -650,7 +512,6 @@ def handler(event, context):
 
         json_content = json.dumps(dashboard_data, cls=DecimalEncoder, ensure_ascii=False, indent=2)
 
-        # Subir data.json al bucket S3
         s3.put_object(
             Bucket=BUCKET_NAME,
             Key='data.json',
@@ -658,8 +519,6 @@ def handler(event, context):
             ContentType='application/json',
             CacheControl='no-cache, no-store, must-revalidate'
         )
-
-        print(f"data.json actualizado con {len(items)} registros en s3://{BUCKET_NAME}/data.json")
 
         return {
             'statusCode': 200,
@@ -683,7 +542,7 @@ def handler(event, context):
 
 resource "aws_lambda_function" "publish_to_s3" {
   function_name    = "${var.project_name}-publish-to-s3"
-  role             = aws_iam_role.lambda_publish_role.arn
+  role             = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/LabRole" # ROL LABORATORIO
   handler          = "handler.handler"
   runtime          = "python3.12"
   filename         = data.archive_file.lambda_publish_zip.output_path
@@ -704,7 +563,7 @@ resource "aws_lambda_function" "publish_to_s3" {
   }
 }
 
-# EventBridge: disparar Lambda 2 cada minuto para actualizar el dashboard
+# EventBridge: disparar Lambda 2 cada minuto
 resource "aws_cloudwatch_event_rule" "publish_schedule" {
   name                = "${var.project_name}-publish-schedule"
   description         = "Actualizar dashboard S3 cada minuto"
@@ -733,7 +592,7 @@ resource "aws_lambda_permission" "allow_eventbridge_publish" {
 
 resource "aws_api_gateway_rest_api" "sensor_api" {
   name        = "${var.project_name}-api"
-  description = "API para recibir datos de sensores (EC2→Lambda) y servir dashboard (Lambda→S3)"
+  description = "API para recibir datos de sensores"
 
   endpoint_configuration {
     types = ["REGIONAL"]
@@ -743,14 +602,13 @@ resource "aws_api_gateway_rest_api" "sensor_api" {
 }
 
 # ---- Recurso /sensor-data ----
-
 resource "aws_api_gateway_resource" "sensor_data" {
   rest_api_id = aws_api_gateway_rest_api.sensor_api.id
   parent_id   = aws_api_gateway_rest_api.sensor_api.root_resource_id
   path_part   = "sensor-data"
 }
 
-# POST /sensor-data → Lambda 1 (ingerir)
+# POST /sensor-data
 resource "aws_api_gateway_method" "post_sensor_data" {
   rest_api_id   = aws_api_gateway_rest_api.sensor_api.id
   resource_id   = aws_api_gateway_resource.sensor_data.id
@@ -775,7 +633,7 @@ resource "aws_lambda_permission" "allow_apigw_ingest" {
   source_arn    = "${aws_api_gateway_rest_api.sensor_api.execution_arn}/*/*"
 }
 
-# GET /sensor-data → Lambda 2 (publicar/leer)
+# GET /sensor-data
 resource "aws_api_gateway_method" "get_sensor_data" {
   rest_api_id   = aws_api_gateway_rest_api.sensor_api.id
   resource_id   = aws_api_gateway_resource.sensor_data.id
@@ -821,5 +679,3 @@ resource "aws_api_gateway_stage" "prod" {
 
   tags = { Project = var.project_name }
 }
-
-
