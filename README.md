@@ -159,6 +159,37 @@ sudo apt install strongswan -y
 
 ---
 
+## 📸 Capturas del proyecto
+
+### ⚡ Terraform Apply — Despliegue de infraestructura
+![Terraform apply completado](images/Captura%20de%20pantalla%202026-03-09%20035405.png)
+
+### 🌐 VPC — Red privada en AWS
+![VPC creada en AWS](images/Captura%20de%20pantalla%202026-03-09%20035436.png)
+
+### 🔒 VPN — Túnel IPSec desde la terminal
+![Túnel VPN activo en terminal](images/Captura%20de%20pantalla%202026-03-09%20035506.png)
+
+### 🔒 VPN — Conexión Site-to-Site en AWS
+![VPN Site-to-Site configurada](images/Captura%20de%20pantalla%202026-03-09%20035538.png)
+
+### 🖥️ EC2 — Broker MQTT
+![Instancia EC2 corriendo](images/Captura%20de%20pantalla%202026-03-09%20041046.png)
+
+### ⚡ Lambda 1 — Ingestión de datos (EC2 → DynamoDB)
+![Lambda ingest-sensor-data](images/Captura%20de%20pantalla%202026-03-09%20041142.png)
+
+### ⚡ Lambda 2 — Publicación (DynamoDB → S3)
+![Lambda publish-to-s3](images/Captura%20de%20pantalla%202026-03-09%20041309.png)
+
+### 🗄️ DynamoDB — Tabla de datos de sensores
+![Tabla DynamoDB con registros](images/Captura%20de%20pantalla%202026-03-09%20041334.png)
+
+### 📊 Dashboard Web — Visualización en tiempo real
+![Dashboard IoT en S3](images/Captura%20de%20pantalla%202026-03-09%20041545.png)
+
+---
+
 ## 📦 Tecnologías utilizadas
 
 - **Terraform** — IaC
