@@ -1,0 +1,589 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'IoT Sensor Platform: VPC, VPN, EC2, API Gateway, Lambda, DynamoDB, S3'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: iot-sensor-project
+    Description: Prefijo para nombrar todos los recursos
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: Bloque CIDR de la VPC
+  RaspberryPiIp:
+    Type: String
+    Default: 0.0.0.0
+    Description: IP publica de la Raspberry Pi (Customer Gateway)
+  Ec2InstanceType:
+    Type: String
+    Default: t3.micro
+    Description: Tipo de instancia EC2
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Nombre del Key Pair de AWS para acceso SSH a la EC2
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+    Description: AMI de Amazon Linux 2023 (Se obtiene automaticamente)
+
+Resources:
+  # ==========================================
+  # VPC Y RED
+  # ==========================================
+  MainVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpc"
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-subnet"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-igw"
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MainVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MainVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-rt"
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # ==========================================
+  # VPN SITE-TO-SITE
+  # ==========================================
+  CustomerGateway:
+    Type: AWS::EC2::CustomerGateway
+    Properties:
+      BgpAsn: 65000
+      IpAddress: !Ref RaspberryPiIp
+      Type: ipsec.1
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-raspberry-cgw"
+
+  VPNGateway:
+    Type: AWS::EC2::VPNGateway
+    Properties:
+      Type: ipsec.1
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vgw"
+
+  AttachVPNGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MainVPC
+      VpnGatewayId: !Ref VPNGateway
+
+  VPNConnection:
+    Type: AWS::EC2::VPNConnection
+    Properties:
+      CustomerGatewayId: !Ref CustomerGateway
+      Type: ipsec.1
+      StaticRoutesOnly: true
+      VpnGatewayId: !Ref VPNGateway
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpn-connection"
+
+  VPNConnectionRoute:
+    Type: AWS::EC2::VPNConnectionRoute
+    Properties:
+      DestinationCidrBlock: 192.168.1.0/24
+      VpnConnectionId: !Ref VPNConnection
+
+  VPNGatewayRoutePropagation:
+    Type: AWS::EC2::VPNGatewayRoutePropagation
+    DependsOn: AttachVPNGateway
+    Properties:
+      RouteTableIds:
+        - !Ref PublicRouteTable
+      VpnGatewayId: !Ref VPNGateway
+
+  # ==========================================
+  # EC2 & SECURITY GROUPS
+  # ==========================================
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG para EC2 que recibe datos de Raspberry Pi por VPN
+      VpcId: !Ref MainVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8883
+          ToPort: 8883
+          CidrIp: 192.168.1.0/24
+        - IpProtocol: tcp
+          FromPort: 1883
+          ToPort: 1883
+          CidrIp: 192.168.1.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-ec2-sg"
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-ec2-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ec2-lambda-invoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt IngestLambda.Arn
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${ProjectName}-ec2-profile"
+      Roles:
+        - !Ref EC2Role
+
+  SensorBrokerEC2:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref Ec2InstanceType
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref KeyPairName
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref PublicSubnet
+          GroupSet:
+            - !Ref EC2SecurityGroup
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          yum update -y
+          yum install -y mosquitto mosquitto-clients python3 python3-pip
+          pip3 install boto3 paho-mqtt
+          systemctl enable mosquitto
+          systemctl start mosquitto
+          echo "EC2 broker MQTT iniciado."
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-sensor-broker"
+
+  EC2ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref SensorBrokerEC2
+
+  # ==========================================
+  # DYNAMODB
+  # ==========================================
+  SensorDataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-sensor-data"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: sensor_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sensor_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # ==========================================
+  # S3 (BUCKET PARA DASHBOARD)
+  # ==========================================
+  WebDashboardBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-web-dashboard-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+
+  WebDashboardBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebDashboardBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub "${WebDashboardBucket.Arn}/*"
+
+  # ==========================================
+  # IAM ROLES PARA LAMBDAS
+  # ==========================================
+  IngestLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-lambda-ingest-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: lambda-ingest-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt SensorDataTable.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  PublishLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-lambda-publish-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: lambda-publish-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                Resource: !GetAtt SensorDataTable.Arn
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                Resource: !Sub "${WebDashboardBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  # ==========================================
+  # LAMBDAS (CÓDIGO INCRUSTADO)
+  # ==========================================
+  IngestLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-ingest-sensor-data"
+      Handler: index.handler
+      Role: !GetAtt IngestLambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref SensorDataTable
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime, timezone
+          import uuid
+
+          dynamodb = boto3.resource('dynamodb')
+          TABLE_NAME = os.environ['DYNAMODB_TABLE']
+
+          def handler(event, context):
+              try:
+                  table = dynamodb.Table(TABLE_NAME)
+                  
+                  if isinstance(event.get('body'), str):
+                      body = json.loads(event['body'])
+                  elif isinstance(event.get('body'), dict):
+                      body = event['body']
+                  else:
+                      body = event
+
+                  timestamp = datetime.now(timezone.utc).isoformat()
+                  item = {
+                      'sensor_id':   body.get('sensor_id', f'sensor_{uuid.uuid4().hex[:8]}'),
+                      'timestamp':   timestamp,
+                      'temperature': str(body.get('temperature', 0)),
+                      'humidity':    str(body.get('humidity', 0)),
+                      'pressure':    str(body.get('pressure', 0)),
+                      'location':    body.get('location', 'unknown'),
+                      'raw_data':    json.dumps(body),
+                  }
+
+                  table.put_item(Item=item)
+                  print(f"Datos guardados: {item}")
+
+                  return {
+                      'statusCode': 200,
+                      'headers': {'Content-Type': 'application/json'},
+                      'body': json.dumps({'message': 'Ok', 'timestamp': timestamp})
+                  }
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  return {'statusCode': 500, 'body': json.dumps({'error': str(e)})}
+
+  PublishLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-publish-to-s3"
+      Handler: index.handler
+      Role: !GetAtt PublishLambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref SensorDataTable
+          S3_BUCKET: !Ref WebDashboardBucket
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime, timezone
+          from decimal import Decimal
+
+          dynamodb = boto3.resource('dynamodb')
+          s3 = boto3.client('s3')
+
+          TABLE_NAME  = os.environ['DYNAMODB_TABLE']
+          BUCKET_NAME = os.environ['S3_BUCKET']
+
+          class DecimalEncoder(json.JSONEncoder):
+              def default(self, obj):
+                  if isinstance(obj, Decimal):
+                      return float(obj)
+                  return super().default(obj)
+
+          def handler(event, context):
+              try:
+                  table = dynamodb.Table(TABLE_NAME)
+                  response = table.scan(Limit=100)
+                  items = response.get('Items', [])
+                  items.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+
+                  dashboard_data = {
+                      'last_updated': datetime.now(timezone.utc).isoformat(),
+                      'total_records': len(items),
+                      'Items': items
+                  }
+
+                  json_content = json.dumps(dashboard_data, cls=DecimalEncoder, ensure_ascii=False, indent=2)
+
+                  s3.put_object(
+                      Bucket=BUCKET_NAME,
+                      Key='data.json',
+                      Body=json_content.encode('utf-8'),
+                      ContentType='application/json',
+                      CacheControl='no-cache, no-store, must-revalidate'
+                  )
+
+                  return {
+                      'statusCode': 200,
+                      'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                      'body': json.dumps(dashboard_data, cls=DecimalEncoder)
+                  }
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  return {'statusCode': 500, 'body': json.dumps({'error': str(e)})}
+
+  # ==========================================
+  # EVENTBRIDGE (CRON)
+  # ==========================================
+  PublishScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-publish-schedule"
+      Description: "Actualizar dashboard S3 cada minuto"
+      ScheduleExpression: "rate(1 minute)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt PublishLambda.Arn
+          Id: "PublishToS3LambdaTarget"
+
+  EventBridgeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PublishLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt PublishScheduleRule.Arn
+
+  # ==========================================
+  # API GATEWAY
+  # ==========================================
+  SensorApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${ProjectName}-api"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  SensorDataResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SensorApi
+      ParentId: !GetAtt SensorApi.RootResourceId
+      PathPart: sensor-data
+
+  PostSensorDataMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SensorApi
+      ResourceId: !Ref SensorDataResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${IngestLambda.Arn}/invocations"
+
+  GetSensorDataMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SensorApi
+      ResourceId: !Ref SensorDataResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PublishLambda.Arn}/invocations"
+
+  ApiGatewayIngestPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IngestLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SensorApi}/*/POST/sensor-data"
+
+  ApiGatewayPublishPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PublishLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SensorApi}/*/GET/sensor-data"
+
+  SensorApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - PostSensorDataMethod
+      - GetSensorDataMethod
+    Properties:
+      RestApiId: !Ref SensorApi
+
+  SensorApiStageProd:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref SensorApi
+      DeploymentId: !Ref SensorApiDeployment
+      StageName: prod
+
+Outputs:
+  VpcId:
+    Description: "ID de la VPC creada"
+    Value: !Ref MainVPC
+  Ec2PublicIp:
+    Description: "IP publica (Elastic IP) de la EC2 (broker MQTT)"
+    Value: !Ref EC2ElasticIP
+  VpnConnectionId:
+    Description: "ID de la conexion VPN Site-to-Site"
+    Value: !Ref VPNConnection
+  VpnConfigurationXML:
+    Description: "Configuracion XML del Customer Gateway (incluye las IPs de los tuneles VPN)"
+    Value: !GetAtt VPNConnection.CustomerGatewayConfiguration
+  DynamoDbTableName:
+    Description: "Nombre de la tabla DynamoDB"
+    Value: !Ref SensorDataTable
+  S3WebsiteUrl:
+    Description: "URL publica del dashboard web alojado en S3"
+    Value: !GetAtt WebDashboardBucket.WebsiteURL
+  ApiGatewayUrl:
+    Description: "Endpoint del API Gateway"
+    Value: !Sub "https://${SensorApi}.execute-api.${AWS::Region}.amazonaws.com/prod/sensor-data"
+  LambdaIngestName:
+    Description: "Nombre de Lambda 1 (Ingest)"
+    Value: !Ref IngestLambda
+  LambdaPublishName:
+    Description: "Nombre de Lambda 2 (Publish)"
+    Value: !Ref PublishLambda
