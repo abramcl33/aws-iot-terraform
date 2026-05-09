@@ -1,15 +1,15 @@
-# 📡 IoT Sensor Platform — Terraform IaC
+# 📡 IoT Sensor Platform — CloudFormation IaC
 
-Infraestructura como código (Terraform) para una plataforma IoT completa que recoge datos de sensores físicos desde una **Raspberry Pi**, los procesa en AWS y los publica en un **dashboard web en tiempo real**.
+Infraestructura como código (AWS CloudFormation) para una plataforma IoT completa que recoge datos de sensores físicos desde una **Raspberry Pi**, los procesa en AWS y los publica en un **dashboard web en tiempo real**.
 
 ---
 
 ## 🏗️ Arquitectura
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  RED LOCAL                          AWS (VPC: 10.0.0.0/16)              │
-│                                                                          │
+│                                                                         │
 │  ┌─────────────┐   IPSec VPN    ┌──────────────────────────────────┐    │
 │  │ Raspberry Pi│ ─────────────► │  EC2 (broker MQTT)               │    │
 │  │  Sensores:  │  Site-to-Site  │  Amazon Linux 2023 + Mosquitto   │    │
@@ -23,25 +23,25 @@ Infraestructura como código (Terraform) para una plataforma IoT completa que re
 │                                  │   GET  /sensor-data     │            │
 │                                  └────────┬────────────────┘            │
 │                                           │                             │
-│                        ┌──────────────────┴──────────────────┐         │
-│                        ▼                                      ▼         │
-│             ┌─────────────────────┐              ┌──────────────────┐  │
-│             │  Lambda 1           │              │  Lambda 2        │  │
-│             │  ingest-sensor-data │              │  publish-to-s3   │  │
-│             │  (Python 3.12)      │              │  (Python 3.12)   │  │
-│             └──────────┬──────────┘              └────────┬─────────┘  │
+│                        ┌──────────────────┴──────────────────┐          │
+│                        ▼                                     ▼          │
+│             ┌─────────────────────┐              ┌──────────────────┐   │
+│             │  Lambda 1           │              │  Lambda 2        │   │
+│             │  ingest-sensor-data │              │  publish-to-s3   │   │
+│             │  (Python 3.12)      │              │  (Python 3.12)   │   │
+│             └──────────┬──────────┘              └────────┬─────────┘   │
 │                        │ PutItem                          │ Scan        │
 │                        ▼                                  │             │
 │             ┌─────────────────────┐                       │             │
 │             │     DynamoDB        │ ◄─────────────────────┘             │
-│             │  sensor-data        │                       │             │
-│             │  PK: sensor_id      │            PutObject  │             │
+│             │  sensor-data        │                                     │
+│             │  PK: sensor_id      │            PutObject                │
 │             │  SK: timestamp      │                       ▼             │
-│             └─────────────────────┘          ┌────────────────────┐    │
-│                                              │  S3 Static Website │    │
-│                      EventBridge             │  index.html        │    │
-│                      (cada 1 min) ──────────►│  data.json         │    │
-│                                              └────────────────────┘    │
+│             └─────────────────────┘          ┌────────────────────┐     │
+│                                              │  S3 Static Website │     │
+│                     EventBridge              │  index.html        │     │
+│                     (cada 1 min) ──────────► │  data.json         │     │
+│                                              └────────────────────┘     │
 │                                                       │                 │
 └───────────────────────────────────────────────────────┼─────────────────┘
                                                         │ HTTP
@@ -54,13 +54,12 @@ Infraestructura como código (Terraform) para una plataforma IoT completa que re
 
 ## 📁 Estructura del proyecto
 
-```
+```text
 .
-├── main.tf          # Recursos AWS: VPC, EC2, VPN, Lambda, DynamoDB, S3, API Gateway
-├── variables.tf     # Declaración de todas las variables configurables
-├── outputs.tf       # Valores exportados tras terraform apply
-├── .gitignore       # ⚠️ Excluye .terraform/, *.tfstate y *.tfvars de Git
-└── README.md        # Este archivo
+├── template.yaml      # Plantilla principal con recursos AWS, parámetros y outputs
+├── parameters.json    # (Opcional) Archivo con los valores específicos de despliegue
+├── .gitignore         # Excluye credenciales y parámetros locales
+└── README.md          # Este archivo
 ```
 
 ---
@@ -75,9 +74,9 @@ Infraestructura como código (Terraform) para una plataforma IoT completa que re
 
 ---
 
-## ⚙️ Variables principales
+## ⚙️ Parámetros del Stack (Parameters)
 
-| Variable | Descripción | Default |
+| Parámetro | Descripción | Default |
 |---|---|---|
 | `aws_region` | Región AWS donde desplegar | `eu-west-1` |
 | `project_name` | Prefijo para nombrar todos los recursos | `iot-sensor-project` |
@@ -86,7 +85,7 @@ Infraestructura como código (Terraform) para una plataforma IoT completa que re
 | `ec2_instance_type` | Tipo de instancia EC2 | `t3.micro` |
 | `ec2_key_pair_name` | Key Pair SSH existente en AWS | `iot-ec2-keypair` ⚠️ |
 
-> ⚠️ Las variables marcadas **deben** cambiarse antes de ejecutar `terraform apply`.
+> ⚠️ Los parámetros marcados **deben** configurarse correctamente al ejecutar el despliegue desde la CLI o en el archivo `parameters.json`.
 
 ---
 
@@ -94,9 +93,8 @@ Infraestructura como código (Terraform) para una plataforma IoT completa que re
 
 ### Prerequisitos
 
-- [Terraform](https://developer.hashicorp.com/terraform/install) >= 1.3.0
 - [AWS CLI](https://aws.amazon.com/cli/) configurado (`aws configure`)
-- Un Key Pair creado en tu cuenta AWS
+- Un Key Pair de EC2 creado en tu cuenta AWS
 
 ### Pasos
 
@@ -105,27 +103,23 @@ Infraestructura como código (Terraform) para una plataforma IoT completa que re
 git clone <tu-repo>
 cd <tu-repo>
 
-# 2. Crear archivo de variables (NO subir a Git)
-cp terraform.tfvars.example terraform.tfvars
-# Editar terraform.tfvars con tu IP de Raspberry Pi y Key Pair
-
-# 3. Inicializar Terraform
-terraform init
-
-# 4. Revisar el plan de cambios
-terraform plan
-
-# 5. Aplicar la infraestructura
-terraform apply
+# 2. Desplegar la infraestructura usando AWS CLI
+aws cloudformation deploy \
+  --template-file template.yaml \
+  --stack-name iot-sensor-stack \
+  --parameter-overrides \
+      RaspberryPiIp="TU_IP_PUBLICA" \
+      KeyPairName="iot-ec2-keypair" \
+  --capabilities CAPABILITY_NAMED_IAM
 ```
 
 ### Outputs tras el despliegue
 
-```
+```text
 ec2_public_ip        = "X.X.X.X"
 vpn_tunnel1_address  = "Y.Y.Y.Y"   ← Configurar en strongSwan de la Raspberry Pi
 vpn_tunnel2_address  = "Z.Z.Z.Z"   ← Failover
-api_gateway_url      = "https://<id>.execute-api.eu-west-1.amazonaws.com/prod/sensor-data"
+api_gateway_url      = "https://<id>[.execute-api.eu-west-1.amazonaws.com/prod/sensor-data](https://.execute-api.eu-west-1.amazonaws.com/prod/sensor-data)"
 s3_website_url       = "http://<bucket>.s3-website-eu-west-1.amazonaws.com"
 dynamodb_table_name  = "iot-sensor-project-sensor-data"
 ```
@@ -133,36 +127,37 @@ dynamodb_table_name  = "iot-sensor-project-sensor-data"
 ### Destruir la infraestructura
 
 ```bash
-terraform destroy
+aws cloudformation delete-stack --stack-name iot-sensor-stack
 ```
 
 ---
 
 ## 🔐 Seguridad
 
-- El archivo `.gitignore` excluye `.terraform/`, `*.tfstate` y `*.tfvars` — **nunca subas estos archivos a GitHub**, contienen claves y el estado completo de tu infraestructura.
+- El archivo `.gitignore` excluye `parameters.json` y cualquier script local — **nunca subas archivos con IPs públicas o parámetros sensibles a GitHub**.
 - El Security Group de la EC2 solo permite tráfico MQTT (`1883`, `8883`) desde la subred de la Raspberry Pi (`192.168.1.0/24`).
 - En producción, restringe el acceso SSH (`puerto 22`) a tu IP específica en lugar de `0.0.0.0/0`.
+- La plantilla despliega roles IAM de menor privilegio (Least Privilege) mediante `CAPABILITY_NAMED_IAM`.
 - Considera añadir autenticación al API Gateway (`API_KEY` o `AWS_IAM`) para el endpoint de ingestión.
 
 ---
 
 ## 🛠️ Configuración VPN en la Raspberry Pi
 
-Tras el `terraform apply`, configura **strongSwan** en la Raspberry Pi con las IPs de los dos túneles del output:
+Tras la creación exitosa del stack en CloudFormation, configura **strongSwan** en la Raspberry Pi con las IPs de los dos túneles obtenidos en los Outputs:
 
 ```bash
 sudo apt install strongswan -y
 # Editar /etc/ipsec.conf y /etc/ipsec.secrets con las IPs de los túneles
-# y el pre-shared key que puedes obtener desde la consola de AWS VPN
+# y la clave precompartida (PSK) que puedes obtener desde la consola de AWS VPN
 ```
 
 ---
 
 ## 📸 Capturas del proyecto
 
-### ⚡ Terraform Apply — Despliegue de infraestructura
-![Terraform apply completado](images/Captura%20de%20pantalla%202026-03-09%20035538.png)
+### ⚡ CloudFormation Deploy — Creación del Stack
+![CloudFormation stack completado](images/Captura%20de%20pantalla%202026-03-09%20035538.png)
 
 ### 🌐 VPC — Red privada en AWS
 ![VPC creada en AWS](images/Captura%20de%20pantalla%202026-03-09%20041046.png)
@@ -192,7 +187,7 @@ sudo apt install strongswan -y
 
 ## 📦 Tecnologías utilizadas
 
-- **Terraform** — IaC
+- **AWS CloudFormation** — IaC (Infraestructura como Código)
 - **AWS VPC** — Red privada aislada
 - **AWS Site-to-Site VPN** — Túnel IPSec seguro
 - **Amazon EC2** — Broker MQTT (Mosquitto)
@@ -201,4 +196,3 @@ sudo apt install strongswan -y
 - **Amazon S3** — Hosting web estático del dashboard
 - **Amazon API Gateway** — Endpoint REST
 - **Amazon EventBridge** — Scheduler para actualizar dashboard
-
