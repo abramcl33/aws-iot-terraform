@@ -157,7 +157,7 @@ sudo apt install strongswan -y
 ## 📸 Capturas del proyecto
 
 ### ⚡ CloudFormation Deploy — Creación del Stack
-![CloudFormation stack completado](images/Captura%20de%20pantalla%202026-03-09%20035538.png)
+![CloudFormation stack completado](images/Captura%20de%20pantalla%202026-05-09%231944.png)
 
 ### 🌐 VPC — Red privada en AWS
 ![VPC creada en AWS](images/Captura%20de%20pantalla%202026-03-09%20041046.png)
